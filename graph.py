@@ -1,8 +1,7 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # coding: utf-8
 
 import os
-os.environ.setdefault('JAVA_HOME', '/usr/lib/jvm/java-1.8.0-openjdk-amd64')
 import networkx as nx
 import community
 import matplotlib.pyplot as plt
@@ -21,8 +20,6 @@ from pyspark.ml.clustering import LDA
 import nltk
 from nltk.stem import WordNetLemmatizer
 from nltk.stem import PorterStemmer
-nltk.download('wordnet')
-
 
 # Importing graph
 
@@ -46,7 +43,7 @@ def verify_graph(g):
 
 def clean_graph(graph):
     print('cleaning graph')
-    #Degree computation
+    #Degree computation 
     nodes_with_degrees = graph.degree
     #mean
     mean_deg = statistics.mean(l[1] for l in nodes_with_degrees)
@@ -103,9 +100,6 @@ def communities_louvain(graph):
 
 
 # categoriy of each partition
-
-driver = GraphDatabase.driver("bolt://localhost:7687", auth=('neo4j','tototo'))
-
 
 # helpers
 
@@ -296,7 +290,7 @@ def show_topic_description(ldaModel, cvmodel):
         
     return tops
     
-def get_topics(spark, communities, tops, transformed):
+def get_topics(communities, tops, transformed):
     cluster_topicDist = sorted(transformed.select('cluster', 'topicDistribution').collect())
     cluster_topicTerms = []
     for e in cluster_topicDist:
@@ -312,7 +306,7 @@ def get_topics(spark, communities, tops, transformed):
     return partitionsData2
 
 
-def topics_with_ml(spark, communities, part_cat_dict):
+def topics_with_ml(communities, part_cat_dict):
     df_ = []
     for p in part_cat_dict:
         df_.append((p, ' '.join(part_cat_dict[p]).replace('_', ' ').replace(',', '').replace('\\\'', ' ').replace('(', '').replace(')', '').lower()))
@@ -331,7 +325,7 @@ def topics_with_ml(spark, communities, part_cat_dict):
     ldaModel = lda_fit(rescaled)
     ldaTransformed = lda_transform(ldaModel, rescaled)
     tops = show_topic_description(ldaModel, cvModel)
-    final = get_topics(spark, communities, tops, ldaTransformed)
+    final = get_topics(communities, tops, ldaTransformed)
     return final
 
 
@@ -440,13 +434,16 @@ def merge(df, m, c, pr, pr2, d, d2):
     udf_get_d2 = udf(get_d2, StringType())
 
     a = df.withColumn('betweenness central node', udf_get_central('cluster'))    .withColumn('max pagerank', udf_get_pr('cluster'))    .withColumn('max isolated pagerank', udf_get_pr2('cluster'))    .withColumn('max degree', udf_get_d('cluster'))    .withColumn('max isolated degree', udf_get_d2('cluster'))    .withColumn('max category', udf_get_maxx('cluster'))
-    
-    #a.show()
-    
+        
     return a
 
 
 def main(args):
+    nltk.download('wordnet')
+    
+    os.environ.setdefault('JAVA_HOME', '/usr/lib/jvm/java-1.8.0-openjdk-amd64')
+    user = os.environ.get('USER')
+
     from os import walk
     mypath = args.inputPath
     max_num_communities = args.nOfClusters
@@ -454,13 +451,19 @@ def main(args):
     #(_, _, filenames) = next(walk(mypath))
     filenames = ["peaks_graph_20190901_20190915.gexf"]
 
-    spark = SparkSession.builder.appName('LDA').config("spark.master", "local[*]").config("spark.sql.warehouse.dir", "/home/ayman/warehouse").getOrCreate()
+    global driver
+    driver = GraphDatabase.driver(args.neo4jAddress, auth=(args.neo4jUsername, args.neo4jPassword))
+
+    global spark
+    spark = SparkSession.builder.appName('graph processing').config("spark.master", "local[*]").config("spark.sql.warehouse.dir", "/home/"+user+"/warehouse").getOrCreate()
+    print("Access UI on : http://0.0.0.0:" + spark.sparkContext.uiWebUrl.split(":")[-1])
+    print("Spark warehouse set to :", spark.conf.get('spark.sql.warehouse.dir'))
 
     for f in sorted(filenames):
         path = mypath + f
         (G_undir, G_dir, communities, part_cat_dict) = ld(path, max_num_communities)
         maxx = find_max_freq(count_all_frequencies(part_cat_dict))
-        lda_df = topics_with_ml(spark, communities, part_cat_dict)
+        lda_df = topics_with_ml(communities, part_cat_dict)
         betweenness_central_nodes = betweenness_centrality_nodes(G_undir, communities)
         pr_result = max_pagerank(G_dir, communities)
         pr2_result = max_pagerank_on_clusters(G_dir, communities)
@@ -479,18 +482,9 @@ def main(args):
         res.select('cluster', 'LDA topics', 'max isolated degree').show(truncate=False)
         res.coalesce(1).write.csv(output_path+f[12:-5], mode = 'overwrite')
 
-
-'''print('betweenness central nodes visualization')
-res.select('cluster', 'LDA topics', 'betweenness central node').show(truncate=False)
-print('max pagerank visualization')
-res.select('cluster', 'LDA topics', 'max pagerank').show(truncate=False)
-print('max pagerank2 visualization')
-res.select('cluster', 'LDA topics', 'max isolated pagerank').show(truncate=False)
-print('max deg visualization')
-res.select('cluster', 'LDA topics', 'max degree').show(truncate=False)
-print('max deg2 visualization')
-res.select('cluster', 'LDA topics', 'max isolated degree').show(truncate=False)
-'''
+    driver.close()
+    spark.stop()
+    return True
 
 
 import argparse
@@ -500,9 +494,13 @@ def parseArguments():
     parser = argparse.ArgumentParser()
 
     # Optional arguments
-    parser.add_argument("-ip", "--inputPath", help="path of the directory containing the graphs.", type=str, default='graphs/')
-    parser.add_argument("-n", "--nOfClusters", help="max number of clusters to extract.", type=int, default=20)
-    parser.add_argument("-op", "--outputPath", help="path of the output directory.", type=str, default='output/')
+    parser.add_argument("-jdk8", "--jdk8Path", help="path to jdk8. Default : /usr/lib/jvm/java-1.8.0-openjdk-amd64", type=str, default='/usr/lib/jvm/java-1.8.0-openjdk-amd64')
+    parser.add_argument("-n4jadr", "--neo4jAddress", help="neo4j database address. Default : bolt://localhost:7687", type=str, default='bolt://localhost:7687')
+    parser.add_argument("-n4jusr", "--neo4jUsername", help="neo4j database username. Default : neo4j", type=str, default='neo4j')
+    parser.add_argument("-n4jpwd", "--neo4jPassword", help="neo4j database password. Default : neo4j", type=str, default='neo4j')
+    parser.add_argument("-ip", "--inputPath", help="path of the directory containing the graphs. Default : graphs/", type=str, default='graphs/')
+    parser.add_argument("-n", "--nOfClusters", help="max number of clusters to extract. Default : 20", type=int, default=20)
+    parser.add_argument("-op", "--outputPath", help="path of the output directory. Default : output/", type=str, default='output/')
 
     # Parse arguments
     args = parser.parse_args()
@@ -511,11 +509,3 @@ def parseArguments():
 
 
 main(parseArguments())
-
-
-# more centrality attributes: pagerank, degrees, and try to find others
-# 
-# make code a sort of an executable tool with arguments etc
-
-
-
