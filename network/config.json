@@ -14,7 +14,7 @@
   },
   "legend": {
     "edgeLabel": "Link",
-    "colorLabel": "Topic",
+    "colorLabel": "Topic Grp",
     "nodeLabel": "Wiki page"
   },
   "features": {
