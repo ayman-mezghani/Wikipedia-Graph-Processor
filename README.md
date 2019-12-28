@@ -6,7 +6,7 @@ Wikipedia Graph Processor is a tool written in Python 3.6 aiming to process wiki
 ### Pre-requisites
 
 You need:
-* an installation of [Apache Spark](https://spark.apache.org/) ([jdk8](https://openjdk.java.net/install/) is required to use Spark propoerly)
+* an installation of [Apache Spark](https://spark.apache.org/) ([JDK8](https://openjdk.java.net/install/) is required to use Spark propoerly)
 * [Python3.6](https://www.python.org/) (or higher)
 * Deployed [Neo4j](https://debian.neo4j.org/) database (see [here](https://github.com/epfl-lts2/sparkwiki/tree/master/helpers#3-deploy-the-graph-database) for the details)
 * Graph output from the LTS2 [SparkWiki tool](https://github.com/epfl-lts2/sparkwiki)
