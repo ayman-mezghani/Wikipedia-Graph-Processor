@@ -15,11 +15,11 @@ You need:
 
 The tool can be run using this command
 ```
-./graph_processing.py --arguments
+./graph.py --arguments
 ```
 or
 ```
-python3 graph_processing.py --arguments
+python3 graph.py --arguments
 ```
 #### Arguments
 * `-h`,`--help`: show help message and exit
