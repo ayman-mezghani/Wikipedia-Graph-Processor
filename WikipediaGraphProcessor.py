@@ -2,27 +2,34 @@
 # coding: utf-8
 
 import os
+
 import networkx as nx
+
 import community
+
+import igraph as ig
+import leidenalg as la
+
 import matplotlib.pyplot as plt
 import statistics
-import pickle
-import pyspark.ml
 
-from pyspark.sql import SparkSession
 from neo4j import GraphDatabase, Driver
 
+import pyspark.ml
+from pyspark.sql import SparkSession
 from pyspark.ml.feature import IDF, Tokenizer, StopWordsRemover, CountVectorizer
-from pyspark.sql.functions import udf, col, lower, regexp_replace
-from pyspark.sql.types import ArrayType, StringType
 from pyspark.ml.clustering import LDA
+from pyspark.sql.functions import udf, col, lower, regexp_replace
+from pyspark.sql import types as T
+
+import spacy
 
 import nltk
 from nltk.stem import WordNetLemmatizer
 from nltk.stem import PorterStemmer
 
-# Importing graph
 
+# Importing graph
 def import_graph(path):
     print('importing graph from :', path)
     directed_g = nx.read_gexf(path, node_type=None, relabel=True)
@@ -31,7 +38,6 @@ def import_graph(path):
 
 
 # Verification
-
 def verify_graph(g):
     print('number of nodes : ' + str(len(g)))
     fig, ax = plt.subplots(figsize=(70, 50)) # set size
@@ -40,10 +46,9 @@ def verify_graph(g):
 
 
 # Graph cleaning
-
 def clean_graph(graph):
     print('cleaning graph')
-    #Degree computation 
+    #Degree computation
     nodes_with_degrees = graph.degree
     #mean
     mean_deg = statistics.mean(l[1] for l in nodes_with_degrees)
@@ -69,7 +74,6 @@ def clean_graph(graph):
 
 
 # Keeping only largest connected component
-
 def largest_connected_component(graph):
     print('largest connected component')
     gcc = max(nx.connected_component_subgraphs(graph), key=len)
@@ -78,7 +82,6 @@ def largest_connected_component(graph):
 
 
 # Partitioning using Louvain
-
 def communities_louvain(graph):
     louvain_communities = community.best_partition(graph, resolution=1)
     louvain_communities_dict = {}
@@ -89,20 +92,45 @@ def communities_louvain(graph):
     
     return louvain_communities_dict
 
-
 # Partitioning using Leiden
-# 
-
 # https://pypi.org/project/leidenalg/
 # https://www.nature.com/articles/s41598-019-41695-z
+# leiden helpers/adapters
+def get_id_to_title(graph):
+    tmp = nx.get_node_attributes(graph, 'id')
+    d = {}
+    for x in tmp:
+        d.setdefault(tmp[x], x)
+    return d
 
+def nx_to_ig(graph):
+    nx.write_graphml(graph,'graph.graphml')
+    graphi = ig.read('graph.graphml',format="graphml")
+    os.remove('graph.graphml')
+    return graphi
 
+def translate_leiden_to_dict(partition, graphi, dictionary):
+    nodes = graphi.vs
+    res = {}
+    for i in range(len(partition)):
+        res.setdefault(i, [])
+        for v in partition[i]:
+            res[i].append(dictionary[nodes[v]['id']])
+    return res
 
+def communities_leiden(graph):
+    graphi = nx_to_ig(graph)
+    partition = la.find_partition(graphi,
+                                  la.ModularityVertexPartition) 
+    dictionary = get_id_to_title(graph)
+    res = translate_leiden_to_dict(partition, graphi, dictionary)
+    
+    print('detcted',len(res),'communities')
+
+    return res
 
 # categoriy of each partition
-
 # helpers
-
 #get list of categories of a page
 def get_categories(page_name):
     c = list()
@@ -110,17 +138,15 @@ def get_categories(page_name):
         with session.begin_transaction() as tx:
             for record in tx.run("MATCH (p:Page)-[:BELONGS_TO]->(c:Category) "
                                  "WHERE p.title = {page_name} "
-                                 "AND NOT exists((c)-[:BELONGS_TO]->(:Category {title: \'Hidden_categories\'})) "
+                                 "AND NOT exists((c)-[:BELONGS_TO]->(:Category {title: \'{hc}\'})) "
                                  "RETURN c.title", 
-                                 page_name = page_name ):
-                #print(record["c.title"])
+                                 page_name = page_name,
+                                 hc = language_mapper[language]):
                 c.append(record["c.title"])
     return c
 
 #map each element to frequency in a list    
 def count_frequency(my_list): 
-      
-    # Creating an empty dictionary  
     freq = {} 
     for items in my_list: 
         freq[items] = my_list.count(items)
@@ -131,28 +157,21 @@ def part_category_fetch(key, dic):
     cat = []
     for title in dic[key]:
         cat += get_categories(title)
-    #print('done fetching')
     return cat
 
 def fetcher(bpd):
     part_cat = {}
     
     for part in sorted(bpd):
-        #print(part)
         cat = part_category_fetch(part, bpd)
-        #print(cat)
         part_cat.setdefault(part, cat)
-    
     return part_cat
 
 
 # Fetch categories for each cluster
-
 def fetch_categories(bpd):
-    part_cat_dict = fetcher(bpd)
-    
+    part_cat_dict = fetcher(bpd)    
     return part_cat_dict
-
 
 def count_all_frequencies(d):
     part_cat_dict_freq = {}
@@ -171,7 +190,6 @@ def find_max_freq(p):
                 cat = x
         max_part_cat.setdefault(e, cat)
     return max_part_cat
-
 
 def get_n_largest_communities(c, n):
     x = min(n, len(c))
@@ -193,20 +211,26 @@ def get_n_largest_communities(c, n):
     
     return res
 
-
+#Load Function
 def ld(path, n):
     undirected_g, directed_g = import_graph(path)
     #verify_graph(g)
     gg = largest_connected_component(clean_graph(undirected_g))
     #verify_graph(gg)
-    communities_ = communities_louvain(gg)
-    communities = get_n_largest_communities(communities_, n)
+    
+    #communities_dict = communities_louvain(gg)
+    communities_dict = communities_leiden(gg)
+    
+    communities = get_n_largest_communities(communities_dict, n)
+    
     undirected_graph = gg.subgraph([x for y in communities.values() for x in y])
     directed_graph = directed_g.subgraph([x for y in communities.values() for x in y])
+        
     print('new number of nodes is :', len(directed_graph))
+    
     part_cat_dict = fetch_categories(communities)
+    
     return undirected_graph, directed_graph, communities, part_cat_dict
-
 
 def tokenize(df):
     print('tokenizing')
@@ -223,18 +247,11 @@ def stop_words_remove(df):
 def lemmatize(df):
     print('lemmatization')
     lemmatizer = WordNetLemmatizer()
-    lemmatizer_udf = udf(lambda tokens: [lemmatizer.lemmatize(token) for token in tokens], ArrayType(StringType()))
+    lemmatizer_udf = udf(lambda tokens: [lemmatizer.lemmatize(token) for token in tokens], T.ArrayType(T.StringType()))
     res = df.withColumn("words", lemmatizer_udf("words"))
     return res
 
-def stem(df):
-    print('stemming')
-    stemmer = PorterStemmer()
-    stemmer_udf = udf(lambda tokens: [stemmer.stem(token) for token in tokens], ArrayType(StringType()))
-    res = df.withColumn("words", stemmer_udf("words"))
-    return res
-
-def cv_fit(df) :   
+def cv_fit(df):
     print('countVectorizer')
     countVectorizer = CountVectorizer(inputCol="words", outputCol="rawFeatures")
     cvmodel = countVectorizer.fit(df)
@@ -250,16 +267,11 @@ def idf(df):
     idfModel = idf_.fit(df)
     res = idfModel.transform(df)
     return res
-    
-    #dataset = rescaledData.select('cluster','categories', 'features')
-    #print(dataset)
-
-    #dataset.show(truncate=False)
-    
+        
 def lda_fit(df):
     # Trains a LDA model.
     print('training LDA')
-    lda_ = LDA(k=df.count(), maxIter=50)
+    lda_ = LDA(k=df.count(), maxIter=100)
     ldaModel = lda_.fit(df)
     return ldaModel
 
@@ -268,13 +280,7 @@ def lda_transform(ldaModel, df):
     transformed = ldaModel.transform(df)
     #transformed.show()
     return transformed
-    
-#    l = transformed.select('topicDistribution').first()[0]
-#    print(transformed.first())
-#    m = list(l).index(max(l))
-#    print('\ntopic index is :',m)
-#    print(topics.take(m+1)[m])
-    
+
 def show_topic_description(ldaModel, cvmodel):
     topicIndices = ldaModel.describeTopics(maxTermsPerTopic = 5)
     vocabList = cvmodel.vocabulary
@@ -284,7 +290,6 @@ def show_topic_description(ldaModel, cvmodel):
         entry = []
         for j in range(len(t)):
             entry.append(vocabList[t[j]])
-            #print('\t', vocabList[t[j]], w[j])
         print(entry)
         tops.append(entry)
         
@@ -305,21 +310,21 @@ def get_topics(communities, tops, transformed):
     partitionsData2.select('cluster', 'LDA topics').show(truncate=False)
     return partitionsData2
 
-
-def topics_with_ml(communities, part_cat_dict):
+def create_df(part_cat_dict):
     df_ = []
     for p in part_cat_dict:
-        df_.append((p, ' '.join(part_cat_dict[p]).replace('_', ' ').replace(',', '').replace('\\\'', ' ').replace('(', '').replace(')', '').lower()))
+        df_.append((p, ' '.join(part_cat_dict[p]).replace('_', ' ').replace(',', '').replace('\\\'', ' ').replace('(', '').replace(')', '').replace('–',' ').lower()))
 
     partitionsData = spark.createDataFrame(df_, ['cluster', 'categories'])
+    return partitionsData
 
+def topics_with_ml(communities, part_cat_dict):
+    
+    partitionsData = create_df(part_cat_dict)
     tokenized = tokenize(partitionsData)
-    cleaned = stop_words_remove(tokenized)
+    cleaned = stop_words_remove(tokenized)    
     lemmatized = lemmatize(cleaned)
-    #stemmed = stem(lemmatized)
-    #cvModel = cv_fit(stemmed)
     cvModel = cv_fit(lemmatized)
-    #cv = cv_transform(cvModel, stemmed)
     cv = cv_transform(cvModel, lemmatized)
     rescaled = idf(cv)
     ldaModel = lda_fit(rescaled)
@@ -327,7 +332,6 @@ def topics_with_ml(communities, part_cat_dict):
     tops = show_topic_description(ldaModel, cvModel)
     final = get_topics(communities, tops, ldaTransformed)
     return final
-
 
 def betweenness_centrality_nodes(graph, clusters_dict):
     res = {}
@@ -345,22 +349,6 @@ def betweenness_centrality_nodes(graph, clusters_dict):
     
     return res
 
-
-def max_pagerank(dir_graph, clusters_dict):
-    pr = nx.algorithms.link_analysis.pagerank_alg.pagerank(dir_graph)
-    res = {}
-    for i in clusters_dict:
-        m = 0
-        n = None
-        for p in clusters_dict[i]:
-            if pr[p] > m:
-                m = pr[p]
-                n = p
-        res.setdefault(i, n)
-
-    return res
-
-
 def max_pagerank_on_clusters(dir_graph, clusters_dict):
     res = {}
     for e in clusters_dict:
@@ -375,22 +363,6 @@ def max_pagerank_on_clusters(dir_graph, clusters_dict):
         res.setdefault(e, n)
     
     return res
-
-
-def max_degree(graph, clusters_dict):
-    d = graph.degree
-    res = {}
-    for i in clusters_dict:
-        m = 0
-        n = None
-        for p in clusters_dict[i]:
-            if d[p] > m:
-                m = d[p]
-                n = p
-        res.setdefault(i, n)
-    
-    return res
-
 
 def max_degree_on_clusters(graph, clusters_dict):
     res = {}
@@ -407,85 +379,106 @@ def max_degree_on_clusters(graph, clusters_dict):
     
     return res
 
-
-def merge(df, m, c, pr, pr2, d, d2):
-    def get_maxx(i):
-        return m[i]
-    udf_get_maxx = udf(get_maxx, StringType())
-
-    def get_central(i):
+def add_column(df, c, name:str, typ):
+    def get_el(i):
         return c[i]
-    udf_get_central = udf(get_central, StringType())
     
-    def get_pr(i):
-        return pr[i]
-    udf_get_pr = udf(get_pr, StringType())
+    udf_get_el = udf(get_el, typ)
     
-    def get_pr2(i):
-        return pr2[i]
-    udf_get_pr2 = udf(get_pr2, StringType())
+    a = df.withColumn(name, udf_get_el('cluster'))
     
-    def get_d(i):
-        return d[i]
-    udf_get_d = udf(get_d, StringType())
-    
-    def get_d2(i):
-        return d2[i]
-    udf_get_d2 = udf(get_d2, StringType())
-
-    a = df.withColumn('betweenness central node', udf_get_central('cluster'))    .withColumn('max pagerank', udf_get_pr('cluster'))    .withColumn('max isolated pagerank', udf_get_pr2('cluster'))    .withColumn('max degree', udf_get_d('cluster'))    .withColumn('max isolated degree', udf_get_d2('cluster'))    .withColumn('max category', udf_get_maxx('cluster'))
-        
     return a
+
+def add_columns(df, l):
+    r = df
+    for col, tag in l:
+        r = add_column(r, col, tag, T.StringType())
+    
+    return r
+
+def add_attributes_from_df(graph, df):
+    rowList = df.collect()
+    d = {}
+    for row in rowList:
+        for p in row[1].split(" - "):
+            d.setdefault(p, {"community": row[0], "lda": row[2]})
+            
+    nx.set_node_attributes(graph, d)
+    
+    return graph
 
 
 def main(args):
-    nltk.download('wordnet')
-    
-    os.environ.setdefault('JAVA_HOME', '/usr/lib/jvm/java-1.8.0-openjdk-amd64')
+    os.environ.setdefault('JAVA_HOME', args.jdk8Path)
     user = os.environ.get('USER')
+    nltk.download('wordnet')
 
-    from os import walk
+    global language
+    language = 'en'
+
     mypath = args.inputPath
     max_num_communities = args.nOfClusters
     output_path = args.outputPath
-    #(_, _, filenames) = next(walk(mypath))
-    filenames = ["peaks_graph_20190901_20190915.gexf"]
+
+
+    from os import walk
+
+    (_, _, filenames) = next(walk(mypath))
+
+    global language_mapper
+    language_mapper = {
+        'en': 'Hidden_categories',
+    }
 
     global driver
-    driver = GraphDatabase.driver(args.neo4jAddress, auth=(args.neo4jUsername, args.neo4jPassword))
+    driver = GraphDatabase.driver("bolt://localhost:7687", auth=(args.neo4jUsername, args.neo4jPassword))
 
     global spark
     spark = SparkSession.builder.appName('graph processing').config("spark.master", "local[*]").config("spark.sql.warehouse.dir", "/home/"+user+"/warehouse").getOrCreate()
-    print("Access UI on : http://0.0.0.0:" + spark.sparkContext.uiWebUrl.split(":")[-1])
+    print("Access UI on : " + spark.sparkContext.uiWebUrl)
     print("Spark warehouse set to :", spark.conf.get('spark.sql.warehouse.dir'))
 
     for f in sorted(filenames):
         path = mypath + f
         (G_undir, G_dir, communities, part_cat_dict) = ld(path, max_num_communities)
+
         maxx = find_max_freq(count_all_frequencies(part_cat_dict))
+
         lda_df = topics_with_ml(communities, part_cat_dict)
+
         betweenness_central_nodes = betweenness_centrality_nodes(G_undir, communities)
-        pr_result = max_pagerank(G_dir, communities)
-        pr2_result = max_pagerank_on_clusters(G_dir, communities)
-        deg = max_degree(G_undir, communities)
-        deg2 = max_degree_on_clusters(G_undir, communities)
-        res = merge(lda_df, maxx, betweenness_central_nodes, pr_result, pr2_result, deg, deg2)
+
+        pr_iso_result = max_pagerank_on_clusters(G_dir, communities)
+
+        deg_iso_result = max_degree_on_clusters(G_undir, communities)
+
+        res = add_columns(lda_df,[(betweenness_central_nodes, 'betweenness central node'),
+                                  (pr_iso_result, 'max isolated pagerank'),
+                                  (deg_iso_result, 'max isolated degree'),
+                                  (maxx, 'max category')])    
+
         print('betweenness central nodes visualization')
         res.select('cluster', 'LDA topics', 'betweenness central node').show(truncate=False)
+
         print('max pagerank visualization')
-        res.select('cluster', 'LDA topics', 'max pagerank').show(truncate=False)
-        print('max pagerank2 visualization')
         res.select('cluster', 'LDA topics', 'max isolated pagerank').show(truncate=False)
+
         print('max deg visualization')
-        res.select('cluster', 'LDA topics', 'max degree').show(truncate=False)
-        print('max deg2 visualization')
         res.select('cluster', 'LDA topics', 'max isolated degree').show(truncate=False)
-        res.coalesce(1).write.csv(output_path+f[12:-5], mode = 'overwrite')
+
+        G = add_attributes_from_df(G_undir, res)
+
+        name = f[12:-5]
+        path = output_path+name+"/"
+        #res.coalesce(1).write.option("header", "true").csv(path, mode = 'overwrite')
+        res\
+        .select("cluster", 'LDA topics', 'betweenness central node', 'max isolated pagerank', 'max isolated degree')\
+        .coalesce(1).write.option("header", "true").csv(path, mode = 'overwrite')
+        nx.write_gexf(G, path+name+".gexf")
 
     driver.close()
     spark.stop()
     return True
-
 
 import argparse
 
@@ -506,6 +499,5 @@ def parseArguments():
     args = parser.parse_args()
 
     return args
-
-
+    
 main(parseArguments())

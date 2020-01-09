@@ -15,11 +15,11 @@ You need:
 
 The tool can be run using this command
 ```
-./graph.py --arguments
+./WikipediaGraphProcessor.py --arguments
 ```
 or
 ```
-python3 graph.py --arguments
+python3 WikipediaGraphProcessor.py --arguments
 ```
 #### Arguments
 * `-h`,`--help`: show help message and exit
