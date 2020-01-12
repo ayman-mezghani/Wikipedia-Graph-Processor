@@ -32,4 +32,4 @@ python3 WikipediaGraphProcessor.py --arguments
 * `-op`,`--outputPath`: path of the output directory. Default: output/
 
 ### Results
-This tool outputs as many folders as graphs. Each folder contains a *.csv file with the clusters and their respective description and a *.gexf file where each node is assigned a class (cluster) and the class' description. 
+This tool outputs as many folders as graphs. Each folder contains a *.csv file with the clusters and their respective description and a *.gexf file where each node is assigned a class (cluster) and the class' description.
